@@ -165,4 +165,4 @@ earliest_date = datetime.datetime.combine(datetime.date.today(), datetime.time()
 races = []
 for date in decrementing_iter(to_date=earliest_date):
     races.extend(get_races(date))
-print len(races)
+print races[0]
