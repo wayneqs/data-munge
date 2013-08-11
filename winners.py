@@ -1,39 +1,63 @@
-from pymongo import MongoClient, DESCENDING
-import datetime
+from pymongo import MongoClient, DESCENDING, ASCENDING
+import datetime, pandas as pd
 
-db = MongoClient().racing_data
+class DataPoint:
+    def __init__(self, ref_date, date, speed):
+        self.ref_date = ref_date
+        self.date = date
+        self.speed = speed
+    def value(self):
+        return self.speed
+    def fade(self):
+        if self.date == None:
+            return 0
+        else:
+            diff = self.ref_date - self.date
+            return diff.days
 
-class Population:
-    def __init__(self, qualification = lambda race: True):
-        self.qualification = qualification
-        self.races_for_date = {}
-    def results(self):
-        return self.races_for_date.iteritems()
-    def add(self, races):
-        if races != None:
-            for race in races:
-                if race.date() in self.races_for_date:
-                    self.races_for_date[race.date()].append(race)
-                else:
-                    self.races_for_date[race.date()] = Races(qualification)
-    def qualifying_races(self):
-        result = []
-        for races in self.races_for_date.itervalues():
-            result.extend(races.qualifying_races())
-        return result
-    def winner_count(self):
-        count = 0.0
-        for race in self.qualifying_races():
-            if race.winner_predicted():
-                count += 1
-        return count
-    def total_count(self):
-        return len(self.qualifying_races())
-    def calculate_return(self, stake):
-        total = 0.0
-        for race in self.qualifying_races():
-            total += race.calculate_return(stake)
-        return total
+class MA:
+    def __init__(self, rm, dates):
+        self.ma = None
+        self.dydx = None
+        if len(dates) >= 1:
+            self.ma = rm[dates[-1]]
+        if len(dates) >= 2:
+            self.dydx = self.ma - rm[dates[-2]]
+
+class SpeedTimeSeries:
+    def __init__(self, db):
+        self.db = db
+    def find_one(self, q, s, ref_date):
+        record = self.db.speed_ts.find_one(q, sort=s)
+        if record == None:
+            return DataPoint(ref_date, None, None)
+        else:
+            return DataPoint(ref_date, record["date"], record["speed"])
+    def last(self, id, date):
+        q = {"horse": id, "date":{"$lt":date}}
+        s = [("date", DESCENDING)]
+        return self.find_one(q, s, date)
+    def top(self, id, date):
+        q = {"horse": id, "date":{"$lt":date}}
+        s = [("speed", DESCENDING)]
+        return self.find_one(q, s, date)
+    def split_for_timeseries(self, q, s):
+        dates, speeds = [], []
+        for record in self.db.speed_ts.find(q, sort=s):
+            dates.append(record["date"])
+            speeds.append(record["speed"])
+        return dates, speeds
+    def ma(self, id, date, length):
+        q = {"horse": id, "date":{"$lt":date}}
+        s = [("date", ASCENDING)]
+        dates, speeds = self.split_for_timeseries(q, s)
+        ts = pd.Series(speeds, dates)
+        rm = pd.rolling_mean(ts, length)
+        return MA(rm, dates)
+    def sma(self, id, date):
+        return self.ma(id, date, 3)
+    def lma(self, id, date):
+        return self.ma(id, date, 6)
 
 class Runner:
     def __init__(self, data):
@@ -58,73 +82,33 @@ class Runner:
         return self.data["position"]
     def race_id(self):
         return self.data["race-id"]
-    def heat(self):
-        return self.rating() / self.odds()
 
+# possibly going to be use for normalisation
 class Races:
-    def __init__(self, qualification = lambda race: True):
-        self.qualification = qualification
+    def __init__(self):
         self.races = []
     def append(self, race):
         self.races.append(race)
-    def winner_count(self):
-        count = 0
-        for race in self.races:
-            if race.winner_predicted():
-                count += 1
-        return count
-    def qualifying_winner_count(self):
-        count = 0
-        for race in self.races:
-            if race.winner_predicted() and race.is_qualifying(qualification):
-                count += 1
-        return count
-    def qualifying_total_count(self):
-        return len(self.qualifying_races())
-    def total_count(self):
-        return len(self.races)
-    def qualifying_races(self):
-        races = []
-        for race in self.races:
-            if race.is_qualifying(qualification):
-                races.append(race)
-        return races
 
 class Race:
-    def __init__(self, id, date, race_type):
-        self.runners = {}
+    def __init__(self, id, date, race_type, distance):
+        self.runners = []
         self.race_id = id
         self.race_date = date
         self.race_type = race_type
+        self.race_distance = distance
     def id(self):
         return self.race_id
     def date(self):
         return self.race_date.strftime("%d-%m-%Y")
     def type(self):
         return self.race_type
-    def winner(self):
-        return self.runners[1]
-    def highest_rated(self):
-        highest = self.runners[1]
-        for x in xrange(2, len(self.runners) + 1):
-            if highest.rating() < self.runners[x].rating():
-                highest = self.runners[x]
-        return highest
-    def winner_predicted(self):
-        return self.winner().id() == self.highest_rated().id()
+    def distance(self):
+        return self.race_distance
     def add(self, runner):
-        self.runners[runner.position()] = runner
-    def all_are_rated(self):
-        for key in self.runners:
-            if self.runners[key].rating() == 0:
-                return False
-        return True
-    def calculate_return(self, stake):
-        if self.winner_predicted():
-            return self.winner().odds() * stake
-        return -stake
-    def is_qualifying(self, f):
-        return f(self)
+        self.runners.append(runner)
+
+db = MongoClient().racing_data
 
 def get_rating(runner, d):
     q = {"id": runner["horse"]["id"], "date":{"$lt":d}}
@@ -134,47 +118,51 @@ def get_rating(runner, d):
     else:
         return {"rating": 0, "std-dev":0}
 
-def get_population(d):
+def get_races(d):
     races = db.cleaned_races.find({"date": d})
     race_list = []
+    speed_gateway = SpeedTimeSeries(db)
     for dbRace in races:
-        race = Race(dbRace["race-id"], d, dbRace["race-type"])
+        race = Race(dbRace["race-id"], d, dbRace["race-type"], dbRace["distance"])
         for runner in dbRace["runners"]:
+            id = runner["horse"]["id"]
+            last = speed_gateway.last(id, d)
+            top = speed_gateway.top(id, d)
+            sma = speed_gateway.sma(id, d)
+            lma = speed_gateway.lma(id, d)
             rating = get_rating(runner, d)
             race.add(Runner({
-                "id": runner["horse"]["id"],
+                "id": id,
+                "age": runner["age"],
+                "weight-total": runner["weight"]["actual"],
+                "weight-jockey-allowance": runner["weight"]["jockey-allowance"],
+                "weight-overhandicap": runner["weight"]["over-handicap"],
                 "position": runner["position"],
                 "rating": rating["rating"],
                 "odds": runner["horse"]["odds"],
-                "std-dev": rating["std-dev"]
+                "std-dev": rating["std-dev"],
+                "speed-last": last.value(),
+                "speed-last-fade": last.fade(),
+                "speed-top": top.value(),
+                "speed-top-fade": top.fade(),
+                "speed-sma": sma.ma,
+                "speed-sma-dydx": sma.dydx,
+                "speed-lma": lma.ma,
+                "speed-lma-dydx": lma.dydx
                 }))
-        if race.all_are_rated():
-            race_list.append(race)
+        race_list.append(race)
     return race_list
 
-d = datetime.datetime(2013, 8, 10)
-#qualification = lambda race: True
-#qualification = lambda race: race.highest_rated().odds() > 3.5
-qualification = lambda race: race.highest_rated().heat() >= 4 and race.highest_rated().heat() <= 6.0
-#qualification = lambda race: race.highest_rated().heat() >= 4 and race.highest_rated().heat() <= 6.0 and race.highest_rated().odds() > 3.5
-population = Population(qualification)
-for x in xrange(1,20):
-#for x in xrange(1,2):
-    date = d-datetime.timedelta(x)
-    population.add(get_population(date))
+def decrementing_iter(from_date=None, to_date=None, delta=datetime.timedelta(days=1)):
+    from_date = from_date or datetime.datetime.combine(datetime.date.today(), datetime.time())
+    while to_date is None or from_date >= to_date:
+        yield from_date
+        from_date = from_date - delta
+    return
 
-print "%s out of %s winners or %s percent" % (population.winner_count(), population.total_count(), population.winner_count() / population.total_count() * 100)
-print "Profit of %s pounds from a stake of %s pounds per race" % (population.calculate_return(1.0), 1.0)
-print ""
-current_date = datetime.datetime.now()
-for date, results in population.results():
-    print "Date: %s, qual %s / %s,  all %s / %s" % (date, results.qualifying_winner_count(), results.qualifying_total_count(), results.winner_count(), results.total_count())
-    print ""
-    for race in results.qualifying_races():
-        if race.winner_predicted():
-            print "WINNER!"
-        print "RaceID: %s, Type: %s" % (race.id(), race.type())
-        for runner in race.runners.itervalues():
-            print "id=%-8s position=%-2s rating=%-15s std-dev=%-15s odds=%-5s heat=%s" % (runner.id(), runner.position(), runner.rating(), runner.std_dev(), runner.odds(), runner.heat())
-        print ""
-        print ""
+#earliest_date = db.cleaned_races.find_one(fields={"date"}, sort=[("date", ASCENDING)])["date"]
+earliest_date = datetime.datetime.combine(datetime.date.today(), datetime.time()) - datetime.timedelta(days=2)
+races = []
+for date in decrementing_iter(to_date=earliest_date):
+    races.extend(get_races(date))
+print len(races)
