@@ -82,6 +82,8 @@ class Runner:
         return self.data["position"]
     def race_id(self):
         return self.data["race-id"]
+    def dump(self):
+        print self.data
 
 # possibly going to be use for normalisation
 class Races:
@@ -107,6 +109,11 @@ class Race:
         return self.race_distance
     def add(self, runner):
         self.runners.append(runner)
+    def dump(self):
+        print "{\"race-id\":%s, \"race-id\":%s, \"race-date\":%s, \"race-type\":%s, \"distance\":{" % (self.race_id, self.race_date, self.race_type, self.race_distance)
+        for r in self.runners:
+            r.dump
+        print "}}"
 
 db = MongoClient().racing_data
 
@@ -165,4 +172,4 @@ earliest_date = datetime.datetime.combine(datetime.date.today(), datetime.time()
 races = []
 for date in decrementing_iter(to_date=earliest_date):
     races.extend(get_races(date))
-print races[0]
+print races[0].dump
