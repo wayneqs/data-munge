@@ -64,14 +64,6 @@ class Runner:
         self.data = data
     def id(self):
         return self.data["id"]
-    def rating(self):
-        rating = self.data["rating"]
-        if rating == None:
-            return 0
-        else:
-            return rating
-    def std_dev(self):
-        return self.data["std-dev"]
     def odds(self):
         odds = self.data["odds"]
         if odds == None:
@@ -93,32 +85,32 @@ class Races:
         self.races.append(race)
 
 class Race:
-    def __init__(self, id, date, race_type, distance):
+    def __init__(self, data, d):
         self.runners = []
-        self.race_id = id
-        self.race_date = date
-        self.race_type = race_type
-        self.race_distance = distance
+        self.data = data
+        self.race_date = d
     def id(self):
-        return self.race_id
+        return self.data["race-id"]
     def date(self):
         return self.race_date.strftime("%d-%m-%Y")
     def type(self):
-        return self.race_type
+        return self.data["race-type"]
     def distance(self):
-        return self.race_distance
+        return self.data["distance"]
+    def distance_category(self):
+        return self.data["distance-category"]
     def add(self, runner):
         self.runners.append(runner)
     def dump(self):
-        print "{\"race-id\":%s, \"race-id\":%s, \"race-date\":%s, \"race-type\":%s, \"distance\":{" % (self.race_id, self.race_date, self.race_type, self.race_distance)
+        print "{\"race-id\":%s, \"race-date\":%s, \"race-type\":%s, \"distance\": %s, \"distance-category\": %s, runners={" % (self.id(), self.date(), self.type(), self.distance(), self.distance_category())
         for r in self.runners:
-            r.dump
+            r.dump()
         print "}}"
 
 db = MongoClient().racing_data
 
-def get_rating(runner, d):
-    q = {"id": runner["horse"]["id"], "date":{"$lt":d}}
+def get_rating(runner, date, distance_category, race_type):
+    q = {"id": runner["horse"]["id"], "date":{"$lt":date}, "distance-category": distance_category, "race-type": race_type}
     rating_cursor = db.rating.find(q).sort("date", DESCENDING)
     if rating_cursor.count() >= 1:
         return rating_cursor[0]
@@ -130,14 +122,14 @@ def get_races(d):
     race_list = []
     speed_gateway = SpeedTimeSeries(db)
     for dbRace in races:
-        race = Race(dbRace["race-id"], d, dbRace["race-type"], dbRace["distance"])
+        race = Race(dbRace, d)
         for runner in dbRace["runners"]:
             id = runner["horse"]["id"]
             last = speed_gateway.last(id, d)
             top = speed_gateway.top(id, d)
             sma = speed_gateway.sma(id, d)
             lma = speed_gateway.lma(id, d)
-            rating = get_rating(runner, d)
+            rating = get_rating(runner, d, race.distance_category(), race.type())
             race.add(Runner({
                 "id": id,
                 "age": runner["age"],
@@ -146,8 +138,8 @@ def get_races(d):
                 "weight-overhandicap": runner["weight"]["over-handicap"],
                 "position": runner["position"],
                 "rating": rating["rating"],
-                "odds": runner["horse"]["odds"],
                 "std-dev": rating["std-dev"],
+                "odds": runner["horse"]["odds"],
                 "speed-last": last.value(),
                 "speed-last-fade": last.fade(),
                 "speed-top": top.value(),
@@ -172,4 +164,4 @@ earliest_date = datetime.datetime.combine(datetime.date.today(), datetime.time()
 races = []
 for date in decrementing_iter(to_date=earliest_date):
     races.extend(get_races(date))
-print races[0].dump
+print races[0].dump()
